@@ -1,0 +1,5 @@
+{
+  "name": "local-mods",
+  "owner": { "name": "Sani11789" },
+  "plugins": [{ "name": "cockpit", "source": "./" }]
+}

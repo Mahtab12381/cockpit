@@ -1,0 +1,6 @@
+{
+  "name": "cockpit",
+  "version": "2.2.0",
+  "description": "Cockpit (formerly usage-status): settings pane with a model & effort picker, a conversations pane, a Quicky pane of your own skills, a usage status line and Clean View (plain plan checklist, technical rows hidden)",
+  "types": "./types/index.d.ts"
+}
