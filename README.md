@@ -2,6 +2,8 @@
 
 A Claude Code mod that puts the controls you reach for most into one place: a settings pane with a model and effort picker, a usage status line, a conversations pane, a Quicky pane of your own skills, and Clean View, a plain-English checklist of what Claude is doing.
 
+![Cockpit: Clean View checklist, status line and footer buttons](docs/images/overview.png)
+
 Cockpit was previously called `usage-status`. On first start it brings over your saved `usage-status` settings.
 
 ## Install
@@ -19,6 +21,8 @@ Restart Claude Code. Buttons for **✦ settings**, **✶ quicky** and **✧ conv
 
 Click **✦ settings** to open the pane. Press Tab to move between items, Enter to toggle one, and Esc to close.
 
+<img src="docs/images/settings.png" alt="Settings pane" width="346">
+
 - **Model & effort:** pick Opus 5.5, Sonnet 5.5, Haiku 5.5 or Fable 5.1, plus an effort level (`auto`, `low`, `medium`, `high`, `xhigh`, `max`). `auto` keeps the session's own effort setting.
 - **Theme:** five gradients (aurora, sunset, ocean, forest, neon). Cockpit remembers the one you pick.
 - **List of mods:** turn each of the features below on or off, and set its options.
@@ -31,6 +35,8 @@ A band above the prompt that shows:
 - how much of the context window is used
 - your 5-hour usage window and when it resets
 
+![Status line](docs/images/status-line.png)
+
 You can hide any of these parts. You can also choose the bar width (5, 10 or 15 cells) and the bar height (thin, half, tall or full).
 
 ### Clean View
@@ -39,9 +45,13 @@ Clean View hides the technical tool rows. In their place it shows a short checkl
 
 Claude fills the checklist through two tools that Cockpit provides, `plan_steps` and `report_progress`. Run `/simple` to turn Clean View on or off.
 
+![Clean View checklist](docs/images/clean-view.png)
+
 ### Quicky
 
 Quicky is a pane of your own skills and slash commands, and each one runs with one click.
+
+<img src="docs/images/quicky.png" alt="Quicky pane" width="346">
 
 - **What it lists:** your own commands (`mine`), the ones you use most (`most used`), or every command (`all`). Each can show its description and how many times you've used it.
 - **Presets:** save the arguments you use often under a command so it runs in one press. If a preset still contains a placeholder such as `<ticket>`, Cockpit puts it in the prompt for you to fill in instead of running it.
@@ -51,13 +61,15 @@ Quicky is a pane of your own skills and slash commands, and each one runs with o
 
 A pane that lists this project's conversations, newest first. Click a row to switch to that conversation, or click **+ New conversation** to start a fresh one.
 
+<img src="docs/images/conversations.png" alt="Conversations pane" width="346">
+
 A colored dot shows each conversation's status:
 
 | Status | Meaning |
 |---|---|
 | working | a turn is running |
-| waiting | Claude asked for your OK or an answer |
-| idle | open in Claude Code and finished |
+| needs you | Claude asked for your OK or an answer |
+| open | open in Claude Code and finished |
 | stopped | the last turn failed or was cut off |
 | closed | not open anywhere |
 
