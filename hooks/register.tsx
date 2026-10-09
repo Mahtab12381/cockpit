@@ -146,7 +146,7 @@ const DEFAULT_CONFIG: StatusConfig = {
   weekly: true,
   weeklyReset: true,
   bars: true,
-  barWidth: 10,
+  barWidth: 5,
   barHeight: 'thin',
 }
 const statusConfig = atom({ plugin: 'cockpit', key: 'statusConfig' } as const, DEFAULT_CONFIG)
@@ -1791,7 +1791,7 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
     </Box>
   )
 
-  const nextWidth = BAR_WIDTHS[(BAR_WIDTHS.indexOf(cfg.barWidth) + 1) % BAR_WIDTHS.length] ?? 10
+  const nextWidth = BAR_WIDTHS[(BAR_WIDTHS.indexOf(cfg.barWidth) + 1) % BAR_WIDTHS.length] ?? 5
   const statusOptions = (
     <Box key="status-options" flexDirection="column" marginTop={1}>
       {subToggle('model', 'Model name', cfg.model)}

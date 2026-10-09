@@ -48,11 +48,12 @@ test('status line options toggle, cycle the bar width, and hide while the status
     await pane.press({ key: 'cfg-model' })
     expect((await pane.find({ key: 'cfg-model' }))?.text).toMatch(/on/)
 
-    expect((await pane.find({ key: 'cfg-barWidth' }))?.text).toMatch(/10/)
+    // a fresh status line starts at 5 cells, then cycles 10, 15 and back
+    expect((await pane.find({ key: 'cfg-barWidth' }))?.text).toMatch(/◂ 5 ▸/)
     await pane.press({ key: 'cfg-barWidth' })
-    expect((await pane.find({ key: 'cfg-barWidth' }))?.text).toMatch(/15/)
+    expect((await pane.find({ key: 'cfg-barWidth' }))?.text).toMatch(/◂ 10 ▸/)
     await pane.press({ key: 'cfg-barWidth' })
-    expect((await pane.find({ key: 'cfg-barWidth' }))?.text).toMatch(/5/)
+    expect((await pane.find({ key: 'cfg-barWidth' }))?.text).toMatch(/◂ 15 ▸/)
     await pane.press({ key: 'cfg-barWidth' })
 
     expect((await pane.find({ key: 'cfg-barHeight' }))?.text).toMatch(/━ thin/)
