@@ -8,7 +8,8 @@ type Task = CleanViewTask
 
 export const PLAN_TOOL = 'mcp__cockpit__plan_steps'
 export const PROGRESS_TOOL = 'mcp__cockpit__report_progress'
-export const ALWAYS_ALLOWED = new Set(['ToolSearch', 'TodoWrite', 'TaskCreate', 'TaskUpdate', 'AskUserQuestion'])
+// Radar's flag tool is allowed before a plan too: a finding can come at any time
+export const ALWAYS_ALLOWED = new Set(['ToolSearch', 'TodoWrite', 'TaskCreate', 'TaskUpdate', 'AskUserQuestion', 'mcp__cockpit__flag_issue'])
 
 export const MAX_NAME = 40
 export const METER = 10

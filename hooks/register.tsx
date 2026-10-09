@@ -78,6 +78,36 @@ import {
   skillNames,
 } from './quicky'
 import type { QuickUsage } from './quicky'
+import {
+  DEFAULT_DIFF_CONFIG,
+  applyStep,
+  cursorStep,
+  loadDiffConfig,
+  makeStep,
+  pendingCount,
+  shortPath,
+  unified,
+} from './diff'
+import {
+  DEFAULT_RADAR_CONFIG,
+  FLAG_TOOL,
+  FLAG_TOOL_DESCRIPTION,
+  FLAG_TOOL_NAME,
+  FLAG_TOOL_SCHEMA,
+  KIND_GLYPH,
+  KIND_LABEL,
+  RADAR_FILTERS,
+  RADAR_GUIDE,
+  RADAR_SORTS,
+  addFlag,
+  fixPrompt,
+  loadRadarConfig,
+  loadRadarItems,
+  openCounts,
+  radarKey,
+  shownItems,
+} from './radar'
+import type { FlagInput } from './radar'
 import type {
   BarWidth,
   BarHeight,
@@ -85,6 +115,9 @@ import type {
   ConversationRow,
   ConversationStatus,
   ConversationsConfig,
+  DiffConfig,
+  DiffStep,
+  DiffStepStatus,
   EffortPick,
   ModelPick,
   PanelView,
@@ -92,6 +125,10 @@ import type {
   QuickPreset,
   QuickPresets,
   QuickyConfig,
+  RadarConfig,
+  RadarItem,
+  RadarSeverity,
+  RadarStatus,
   StatusConfig,
   ThemeName,
 } from '../types'
@@ -442,7 +479,8 @@ const PANEL_VIEW_KEY = 'panelView'
 async function currentPanelView($: Engine): Promise<PanelView> {
   const fromState = await read($, panelView)
   const saved = await $.store.get(PANEL_VIEW_KEY).catch(() => undefined)
-  return saved === 'conversations' || saved === 'settings' || saved === 'quicky' ? saved : fromState
+  const views: readonly PanelView[] = ['conversations', 'settings', 'quicky', 'diff', 'radar']
+  return views.includes(saved as PanelView) ? (saved as PanelView) : fromState
 }
 
 // a list emptied by a session swap reloads itself the first time the pane draws it
@@ -455,6 +493,14 @@ function ensureConversations($: Engine) {
     .finally(() => (isLoadingConversations = false))
 }
 
+const PANEL_TITLES: Record<PanelView, string> = {
+  settings: 'Settings',
+  quicky: 'Quicky',
+  conversations: 'Conversations',
+  diff: 'Changes',
+  radar: 'Radar',
+}
+
 // one docked pane shows either view; opening the open pane again only retitles it
 async function openPanel($: Engine, view: PanelView) {
   await $.ui.close({ id: LEGACY_CONVERSATIONS_PANE }).catch(() => undefined)
@@ -463,7 +509,7 @@ async function openPanel($: Engine, view: PanelView) {
   await update($, panelView, () => view)
   // the atom may already hold this view (a session swap reset it), so redraw regardless
   $.ui.invalidate('ui.render')
-  const title = view === 'settings' ? 'Settings' : view === 'quicky' ? 'Quicky' : 'Conversations'
+  const title = PANEL_TITLES[view]
   await $.ui.open({ id: SETTINGS_PANE, title, focus: true, closeOnEscape: true })
 }
 
@@ -756,6 +802,627 @@ async function newConversation($: Engine) {
   await reloadAfterSwap($, current => current !== '' && current !== before)
 }
 
+// ── Changes: every file edit Claude makes, one step each, accepted or undone in order ──
+
+const DIFF_CONFIG_KEY = 'diffConfig'
+const diffConfig = atom({ plugin: 'cockpit', key: 'diffConfig' } as const, DEFAULT_DIFF_CONFIG)
+// this conversation's steps, oldest first; a session swap starts a fresh list
+const diffSteps = atom({ plugin: 'cockpit', key: 'diffSteps' } as const, [] as DiffStep[])
+// the step the pane shows; null follows the first one still to review
+const diffCursor = atom({ plugin: 'cockpit', key: 'diffCursor' } as const, null as number | null)
+
+// the store is the truth (a session swap resets $.state); the atom is read so a change redraws
+async function readDiffConfig($: Engine): Promise<DiffConfig> {
+  await read($, diffConfig)
+  return loadDiffConfig(await $.store.get(DIFF_CONFIG_KEY).catch(() => undefined))
+}
+
+async function setDiffConfig($: Engine, patch: Partial<DiffConfig>) {
+  const next = { ...(await readDiffConfig($)), ...patch }
+  await $.store.set(DIFF_CONFIG_KEY, next)
+  await update($, diffConfig, () => next)
+  $.ui.invalidate('ui.render')
+}
+
+async function openChanges($: Engine) {
+  await openPanel($, 'diff')
+}
+
+// a file tool's call, read around: the file before and after, kept as a step when it changed
+async function recordFileTool($: Engine, path: string, tool: string, before: string | null) {
+  const after = await $.fs.read(path).catch(() => null)
+  if (after === null) return
+  const at = await $.clock.now()
+  await update($, diffSteps, steps => {
+    const step = makeStep((steps[steps.length - 1]?.id ?? 0) + 1, path, tool, at, before, after)
+    return step === null ? steps : [...steps, step]
+  })
+}
+
+// $.fs has no delete: the platform's own command, else the file is left empty
+async function removeFile($: Engine, path: string) {
+  const isWindows = (await $.env.get('OS')) === 'Windows_NT'
+  const argv = isWindows ? ['cmd', '/d', '/c', 'del', '/f', '/q', path.replace(/\//g, '\\')] : ['rm', '-f', '--', path]
+  await $.process.run(argv, { timeoutMs: 10_000 }).catch(() => null)
+  if (await $.fs.exists(path).catch(() => true)) {
+    await $.fs.write(path, '')
+    $.ui.toast(`Could not delete ${path}; it is left empty`)
+  }
+}
+
+// takes a step back out of its file, or puts it back; false when the file changed over it since
+async function applyToFile($: Engine, step: DiffStep, direction: 'undo' | 'redo'): Promise<boolean> {
+  const isThere = await $.fs.exists(step.path).catch(() => false)
+  const current = isThere ? await $.fs.read(step.path).catch(() => null) : ''
+  if (current === null) return false
+  const next = applyStep(current, step, direction)
+  if (next === null) return false
+  if (direction === 'undo' && step.isNew && next === '') {
+    await removeFile($, step.path)
+  } else {
+    await $.fs.write(step.path, next)
+  }
+  return true
+}
+
+async function setStepStatus($: Engine, ids: readonly number[], status: DiffStepStatus) {
+  await update($, diffSteps, steps => steps.map(s => (ids.includes(s.id) ? { ...s, status } : s)))
+}
+
+// after a step is decided the pane moves on to the next one still to review
+async function advanceFrom($: Engine, id: number) {
+  const steps = await read($, diffSteps)
+  const at = steps.findIndex(s => s.id === id)
+  const next = [...steps.slice(at + 1), ...steps.slice(0, at)].find(s => s.status === 'pending')
+  await update($, diffCursor, () => next?.id ?? id)
+}
+
+async function acceptStep($: Engine, id: number) {
+  await setStepStatus($, [id], 'accepted')
+  await advanceFrom($, id)
+}
+
+async function undoStep($: Engine, id: number) {
+  const step = (await read($, diffSteps)).find(s => s.id === id)
+  if (!step || step.status === 'undone') return
+  const root = await $.session.root().catch(() => '')
+  if (!(await applyToFile($, step, 'undo'))) {
+    $.ui.toast(`Step ${id}: ${shortPath(step.path, root)} changed since — undo the later steps on it first`)
+    return
+  }
+  await setStepStatus($, [id], 'undone')
+  await advanceFrom($, id)
+}
+
+async function redoStep($: Engine, id: number) {
+  const step = (await read($, diffSteps)).find(s => s.id === id)
+  if (!step || step.status !== 'undone') return
+  const root = await $.session.root().catch(() => '')
+  if (!(await applyToFile($, step, 'redo'))) {
+    $.ui.toast(`Step ${id}: ${shortPath(step.path, root)} changed since — it cannot be put back`)
+    return
+  }
+  await setStepStatus($, [id], 'pending')
+}
+
+async function acceptAll($: Engine) {
+  const ids = (await read($, diffSteps)).filter(s => s.status === 'pending').map(s => s.id)
+  await setStepStatus($, ids, 'accepted')
+}
+
+// newest first, so each step finds its file as it left it
+async function undoAll($: Engine) {
+  const pending = (await read($, diffSteps)).filter(s => s.status === 'pending').reverse()
+  const undone: number[] = []
+  for (const step of pending) {
+    if (await applyToFile($, step, 'undo')) undone.push(step.id)
+  }
+  await setStepStatus($, undone, 'undone')
+  const missed = pending.length - undone.length
+  if (missed > 0) $.ui.toast(`${missed} step(s) could not be undone: their files changed since`)
+}
+
+async function clearReviewed($: Engine) {
+  await update($, diffSteps, steps => steps.filter(s => s.status === 'pending'))
+  await update($, diffCursor, () => null)
+}
+
+// the file is read before and after a file tool's call; a call that changed it is a step
+async function trackFileTool<E extends { tool: string }, R extends { deny?: string; isError?: boolean }>(
+  $: Engine,
+  e: E,
+  next: (e: E) => Promise<R>,
+): Promise<R> {
+  const path = argOf(e, 'file_path') ?? argOf(e, 'notebook_path')
+  if (typeof path !== 'string' || !(await readDiffConfig($)).enabled) return next(e)
+  const before = (await $.fs.exists(path).catch(() => false)) ? await $.fs.read(path).catch(() => undefined) : null
+  const ran = await next(e)
+  // a file too big to read is not tracked
+  if (ran.deny !== undefined || ran.isError === true || before === undefined) return ran
+  await recordFileTool($, path, String(e.tool), before).catch(() => undefined)
+  return ran
+}
+
+function registerChanges(on: On): void {
+  on('command.run', { command: 'changes' }, async $ => {
+    if (!(await readDiffConfig($)).enabled) return { text: 'Changes is off; turn it on in ✦ settings.' }
+    await openChanges($)
+    return { text: '' }
+  })
+
+  on('tool.call', { tool: 'Edit' }, async ($, e, next) => trackFileTool($, e, next))
+  on('tool.call', { tool: 'Write' }, async ($, e, next) => trackFileTool($, e, next))
+  on('tool.call', { tool: 'NotebookEdit' }, async ($, e, next) => trackFileTool($, e, next))
+}
+
+const STEP_MARK: Record<DiffStepStatus, string> = { pending: '●', accepted: '✓', undone: '↶' }
+const STEP_COLOR = (s: DiffStepStatus) => (s === 'accepted' ? THEME.on : s === 'undone' ? HEAT[2] : AURORA[1])
+
+// the changes pane: a summary with the all-at-once actions, then one step at a time (its diff,
+// accept and undo, prev and next), then every step listed, a press jumping to it
+async function renderChanges($: EngineInterface, e: Extract<RenderInput, { component: 'Pane' }>) {
+  applyTheme(await read($, themeAtom))
+  const { Box, Button, Code, Text } = $.ui.resolve(e)
+  const steps = await read($, diffSteps)
+  const cfg = await readDiffConfig($)
+  const cursor = await read($, diffCursor)
+  const root = await $.session.root().catch(() => '')
+  const now = await $.clock.now()
+  const width = Math.max(8, e.props.bodyColumns - 4)
+  const shown = cfg.hideReviewed ? steps.filter(s => s.status === 'pending') : steps
+  const step = cursorStep(shown, cursor)
+  const index = step === null ? -1 : shown.indexOf(step)
+  const toReview = pendingCount(steps)
+  const accepted = steps.filter(s => s.status === 'accepted').length
+  const undone = steps.filter(s => s.status === 'undone').length
+  const goTo = (id: number) => void update($, diffCursor, () => id)
+
+  const action = (key: string, label: string, color: string | undefined, onPress: () => void) => (
+    <Button key={key} label={label} plain color={color} hover={{ color: AURORA[0], bold: true }} onPress={onPress} />
+  )
+
+  const stepCard = (s: DiffStep) => {
+    const { text, hidden } = unified(s)
+    const name = shortPath(s.path, root)
+    return (
+      <Box
+        key={`step-card-${s.id}`}
+        flexDirection="column"
+        borderStyle="round"
+        borderColor={STEP_COLOR(s.status)}
+        paddingX={1}
+      >
+        <Box flexDirection="row" justifyContent="space-between" gap={1}>
+          <Box flexShrink={1} flexDirection="row">
+            <Text color={STEP_COLOR(s.status)}>{`${STEP_MARK[s.status]} `}</Text>
+            <Text bold color={AURORA[0]} wrap="truncate-end">
+              {fit(name, width - 24)}
+            </Text>
+          </Box>
+          <Box flexShrink={0} flexDirection="row">
+            <Text color={THEME.faint}>{`${s.isNew ? 'new · ' : ''}${s.tool} · `}</Text>
+            <Text color={THEME.on}>{`+${s.added}`}</Text>
+            <Text color={HEAT[2]}>{` −${s.removed}`}</Text>
+            <Text color={THEME.faint}>{` · ${ago(s.at, now)}`}</Text>
+          </Box>
+        </Box>
+        <Box flexDirection="row" gap={2} marginTop={1}>
+          {s.status === 'pending' ? action(`accept-${s.id}`, '✓ accept', THEME.on, () => void acceptStep($, s.id)) : null}
+          {s.status !== 'undone' ? action(`undo-${s.id}`, '↶ undo', HEAT[2], () => void undoStep($, s.id)) : null}
+          {s.status === 'undone' ? action(`redo-${s.id}`, '↷ redo', AURORA[1], () => void redoStep($, s.id)) : null}
+          {s.status !== 'pending' ? <Text color={THEME.faint}>{s.status}</Text> : null}
+        </Box>
+        <Box marginTop={1} flexDirection="column">
+          <Code key={`diff-${s.id}`} source={text} format="diff" path={s.path} wrap="truncate-end" />
+          {hidden > 0 ? <Text color={THEME.faint}>{`… ${hidden} more line(s)`}</Text> : null}
+        </Box>
+      </Box>
+    )
+  }
+
+  const listRow = (s: DiffStep) => {
+    const isCurrent = s.id === step?.id
+    const label = `${isCurrent ? '▸' : ' '} ${s.id}. ${fit(shortPath(s.path, root), width - 22)}`
+    return (
+      <Box key={`step-row-${s.id}`} flexDirection="row" justifyContent="space-between" gap={1}>
+        <Box flexShrink={1} flexDirection="row">
+          <Text color={STEP_COLOR(s.status)}>{`${STEP_MARK[s.status]} `}</Text>
+          {isCurrent ? (
+            <Text bold color={AURORA[0]} wrap="truncate-end">
+              {label}
+            </Text>
+          ) : (
+            <Button
+              key={`goto-${s.id}`}
+              label={label}
+              plain
+              dimColor={s.status !== 'pending'}
+              hover={{ color: AURORA[0], bold: true }}
+              onPress={() => goTo(s.id)}
+            />
+          )}
+        </Box>
+        <Text color={THEME.faint}>{`+${s.added} −${s.removed}`}</Text>
+      </Box>
+    )
+  }
+
+  const prev = index > 0 ? shown[index - 1] : undefined
+  const next = index >= 0 && index < shown.length - 1 ? shown[index + 1] : undefined
+
+  return (
+    <Box key="changes" flexDirection="column" paddingX={2} paddingTop={0} paddingBottom={1} gap={1}>
+      <Box flexDirection="column">
+        {gradientText(Text, 'changes-title', '± CHANGES')}
+        <Text color={THEME.faint}>{'━'.repeat(Math.min(34, width))}</Text>
+      </Box>
+      {steps.length === 0 ? (
+        <Text color={THEME.muted}>No changes yet: each file edit Claude makes shows here as a step</Text>
+      ) : (
+        <Box key="changes-summary" flexDirection="column">
+          <Text color={THEME.muted}>
+            <Text color={AURORA[1]} bold>{`${toReview} to review`}</Text>
+            {` · ${accepted} accepted · ${undone} undone`}
+          </Text>
+          <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+            {toReview > 0 ? action('accept-all', '✓ accept all', THEME.on, () => void acceptAll($)) : null}
+            {toReview > 0 ? action('undo-all', '↶ undo all', HEAT[2], () => void undoAll($)) : null}
+            {accepted + undone > 0
+              ? action('clear-reviewed', 'clear reviewed', THEME.muted, () => void clearReviewed($))
+              : null}
+          </Box>
+        </Box>
+      )}
+      {step === null ? (
+        steps.length > 0 ? <Text color={THEME.muted}>Every step is reviewed</Text> : null
+      ) : (
+        <Box key="changes-step" flexDirection="column">
+          <Box flexDirection="row" justifyContent="space-between">
+            {prev ? action('step-prev', '◂ prev', AURORA[1], () => goTo(prev.id)) : <Text color={THEME.faint}>◂ prev</Text>}
+            <Text color={THEME.muted}>{`step ${index + 1} of ${shown.length}`}</Text>
+            {next ? action('step-next', 'next ▸', AURORA[1], () => goTo(next.id)) : <Text color={THEME.faint}>next ▸</Text>}
+          </Box>
+          {stepCard(step)}
+        </Box>
+      )}
+      {shown.length > 1 ? (
+        <Box key="changes-list" flexDirection="column">
+          {gradientText(Text, 'changes-list-title', '◆ ALL STEPS')}
+          {shown.map(listRow)}
+        </Box>
+      ) : null}
+      <Text color={THEME.faint}>accept keeps a step · undo takes it out of the file · esc close</Text>
+    </Box>
+  )
+}
+
+// ── Radar: flaws, risks and inconsistencies spotted along the way, a to-do list per project ──
+
+const RADAR_CONFIG_KEY = 'radarConfig'
+const radarConfig = atom({ plugin: 'cockpit', key: 'radarConfig' } as const, DEFAULT_RADAR_CONFIG)
+// read so a write redraws; the store, one list per project, is the truth
+const radarItems = atom({ plugin: 'cockpit', key: 'radarItems' } as const, null as RadarItem[] | null)
+// writes one after another, so findings flagged in parallel never overwrite each other
+let radarQueue: Promise<unknown> = Promise.resolve()
+let radarSeq = 0
+
+async function readRadarConfig($: Engine): Promise<RadarConfig> {
+  await read($, radarConfig)
+  return loadRadarConfig(await $.store.get(RADAR_CONFIG_KEY).catch(() => undefined))
+}
+
+async function setRadarConfig($: Engine, patch: Partial<RadarConfig>) {
+  const next = { ...(await readRadarConfig($)), ...patch }
+  await $.store.set(RADAR_CONFIG_KEY, next)
+  await update($, radarConfig, () => next)
+  $.ui.invalidate('ui.render')
+}
+
+const radarStoreKey = async ($: Engine) => radarKey(projectDirName(await $.session.root()))
+
+async function readRadarItems($: Engine): Promise<RadarItem[]> {
+  await read($, radarItems)
+  return loadRadarItems(await $.store.get(await radarStoreKey($)).catch(() => undefined))
+}
+
+async function changeRadar<T>($: Engine, fn: (items: RadarItem[], now: number) => { items: RadarItem[]; out: T }) {
+  const run = radarQueue.then(async () => {
+    const { items, out } = fn(await readRadarItems($), await $.clock.now())
+    await $.store.set(await radarStoreKey($), items)
+    await update($, radarItems, () => items)
+    $.ui.invalidate('ui.render')
+    return out
+  })
+  radarQueue = run.catch(() => undefined)
+  return run
+}
+
+const newRadarId = (now: number) => `${now.toString(36)}-${(radarSeq++).toString(36)}`
+
+async function flagRadar($: Engine, input: FlagInput, source: 'claude' | 'me') {
+  return changeRadar($, (items, now) => {
+    const added = addFlag(items, input, source, newRadarId(now), now)
+    return { items: added.items, out: added }
+  })
+}
+
+async function setRadarStatus($: Engine, id: string, status: RadarStatus) {
+  await changeRadar($, (items, now) => ({
+    items: items.map(i => (i.id === id ? { ...i, status, closedAt: status === 'open' ? null : now } : i)),
+    out: null,
+  }))
+}
+
+const NEXT_SEVERITY: Record<RadarSeverity, RadarSeverity> = { high: 'medium', medium: 'low', low: 'high' }
+
+async function cycleRadarSeverity($: Engine, id: string) {
+  await changeRadar($, items => ({
+    items: items.map(i => (i.id === id ? { ...i, severity: NEXT_SEVERITY[i.severity] } : i)),
+    out: null,
+  }))
+}
+
+async function deleteRadarItem($: Engine, id: string) {
+  await changeRadar($, items => ({ items: items.filter(i => i.id !== id), out: null }))
+}
+
+async function clearClosedRadar($: Engine) {
+  await changeRadar($, items => ({ items: items.filter(i => i.status === 'open'), out: null }))
+}
+
+async function openRadar($: Engine) {
+  await openPanel($, 'radar')
+}
+
+// puts a fix request in the prompt box to send or add to; the pane stays, without the keys
+async function fixRadarItem($: Engine, item: RadarItem) {
+  const filled = await $.prompt.fill({ text: fixPrompt(item), mode: 'replace' }).catch(() => null)
+  if (filled && !filled.isFilled) {
+    $.ui.toast('Could not fill the prompt now; try again once the current turn finishes')
+    return
+  }
+  await $.ui.close({ id: SETTINGS_PANE }).catch(() => undefined)
+  await $.ui.open({ id: SETTINGS_PANE, title: PANEL_TITLES.radar, closeOnEscape: true }).catch(() => undefined)
+}
+
+function registerRadar(on: On): void {
+  on('command.run', { command: 'radar' }, async ($, e) => {
+    if (!(await readRadarConfig($)).enabled) return { text: 'Radar is off; turn it on in ✦ settings.' }
+    const note = e.args.trim()
+    if (note === '') {
+      await openRadar($)
+      return { text: '' }
+    }
+    const { item } = await flagRadar($, { title: note, kind: 'note', severity: 'medium' }, 'me')
+    return { text: item ? `◎ On the radar: ${item.title}` : 'Nothing to add.' }
+  })
+
+  // Claude's findings: answered here, never passed on (the tool is this plugin's own)
+  on('tool.call', { tool: FLAG_TOOL }, async ($, e) => {
+    const cfg = await readRadarConfig($)
+    if (!cfg.enabled || !cfg.autoFlag) return { result: 'The radar is off; nothing was flagged. Carry on with the task.' }
+    const { item, isNew } = await flagRadar($, e as unknown as FlagInput, 'claude')
+    if (item === null) return { result: 'Nothing flagged: give a short title.' }
+    if (isNew && cfg.toast) $.ui.toast(`◎ Radar: ${item.title}`)
+    return { result: isNew ? 'Flagged on the radar. Carry on with the task.' : 'Already on the radar; updated it. Carry on.' }
+  })
+}
+
+const SEVERITY_COLOR = (s: RadarSeverity) => (s === 'high' ? THEME.danger : s === 'medium' ? THEME.warn : AURORA[0])
+
+// the radar: a severity summary, the filter and sort, one card per item with its actions,
+// then a field to note something yourself
+async function renderRadar($: EngineInterface, e: Extract<RenderInput, { component: 'Pane' }>) {
+  applyTheme(await read($, themeAtom))
+  const table = $.ui.resolve(e)
+  const { Box, Button, Text } = table
+  // every surface but mobile draws a text field
+  const Input = 'Input' in table ? table.Input : null
+  const cfg = await readRadarConfig($)
+  const items = await readRadarItems($)
+  const counts = openCounts(items)
+  const closed = items.length - counts.total
+  const shown = shownItems(items, cfg.filter, cfg.sort)
+  const now = await $.clock.now()
+  const width = Math.max(12, e.props.bodyColumns - 4)
+
+  const chip = (key: string, label: string, color: string | undefined) => (
+    <Box key={key} flexShrink={0}>
+      <Text color={THEME.chipText} backgroundColor={color} bold>
+        {` ${label} `}
+      </Text>
+    </Box>
+  )
+
+  const choice = <T extends string>(group: string, options: readonly { value: T; label: string }[], picked: T, onPick: (v: T) => void) => (
+    <Box key={`radar-${group}`} flexDirection="row" columnGap={1}>
+      {options.map(o =>
+        o.value === picked ? (
+          <Box key={`radar-${group}-${o.value}`}>{capsule(Box, Text, `cap-radar-${group}-${o.value}`, o.label)}</Box>
+        ) : (
+          <Button
+            key={`radar-${group}-${o.value}`}
+            label={o.label}
+            plain
+            dimColor
+            hover={{ color: AURORA[0], bold: true }}
+            onPress={() => onPick(o.value)}
+          />
+        ),
+      )}
+    </Box>
+  )
+
+  const card = (i: RadarItem) => {
+    const isOpen = i.status === 'open'
+    const color = SEVERITY_COLOR(i.severity)
+    const meta = [
+      KIND_LABEL[i.kind],
+      i.inScope ? 'in this task' : null,
+      ago(i.createdAt, now),
+      i.source === 'me' ? 'yours' : null,
+      isOpen ? null : i.status,
+    ].filter(Boolean)
+    return (
+      <Box
+        key={`radar-item-${i.id}`}
+        flexDirection="column"
+        borderStyle="round"
+        borderColor={isOpen ? color : THEME.borderOff}
+        paddingX={1}
+      >
+        <Box flexDirection="row" justifyContent="space-between" gap={1}>
+          <Box flexShrink={1} flexDirection="row">
+            <Text color={isOpen ? color : THEME.off}>{`${KIND_GLYPH[i.kind]} `}</Text>
+            <Text bold={isOpen} color={isOpen ? undefined : THEME.muted} strikethrough={i.status === 'done'} wrap="truncate-end">
+              {fit(i.title, width - 16)}
+            </Text>
+          </Box>
+          {isOpen ? (
+            <Button
+              key={`radar-sev-${i.id}`}
+              label={` ${i.severity} `}
+              plain
+              color={color}
+              hover={{ color: AURORA[0], bold: true }}
+              onPress={() => void cycleRadarSeverity($, i.id)}
+            />
+          ) : (
+            chip(`radar-sev-${i.id}`, i.severity, THEME.borderOff)
+          )}
+        </Box>
+        {cfg.details && i.detail ? (
+          <Text color={THEME.muted} wrap="wrap">{`  ${i.detail}`}</Text>
+        ) : null}
+        {cfg.files && i.file ? (
+          <Text color={AURORA[0]} wrap="truncate-end">{`  ↳ ${fit(i.file, width - 6)}`}</Text>
+        ) : null}
+        <Box flexDirection="row" justifyContent="space-between" gap={1}>
+          <Text color={THEME.faint} wrap="truncate-end">{`  ${meta.join(' · ')}`}</Text>
+          <Box flexShrink={0} flexDirection="row" gap={2}>
+            {isOpen ? (
+              <Button
+                key={`radar-fix-${i.id}`}
+                label="→ fix"
+                plain
+                color={AURORA[1]}
+                hover={{ color: AURORA[0], bold: true }}
+                onPress={() => void fixRadarItem($, i)}
+              />
+            ) : null}
+            {isOpen ? (
+              <Button
+                key={`radar-done-${i.id}`}
+                label="✓ done"
+                plain
+                color={THEME.on}
+                hover={{ color: AURORA[0], bold: true }}
+                onPress={() => void setRadarStatus($, i.id, 'done')}
+              />
+            ) : null}
+            {isOpen ? (
+              <Button
+                key={`radar-dismiss-${i.id}`}
+                label="× dismiss"
+                plain
+                dimColor
+                hover={{ color: THEME.danger, bold: true }}
+                onPress={() => void setRadarStatus($, i.id, 'dismissed')}
+              />
+            ) : null}
+            {isOpen ? null : (
+              <Button
+                key={`radar-reopen-${i.id}`}
+                label="↺ reopen"
+                plain
+                color={AURORA[1]}
+                hover={{ color: AURORA[0], bold: true }}
+                onPress={() => void setRadarStatus($, i.id, 'open')}
+              />
+            )}
+            {isOpen ? null : (
+              <Button
+                key={`radar-del-${i.id}`}
+                label="del"
+                plain
+                dimColor
+                hover={{ color: THEME.danger, bold: true }}
+                onPress={() => void deleteRadarItem($, i.id)}
+              />
+            )}
+          </Box>
+        </Box>
+      </Box>
+    )
+  }
+
+  const empty =
+    cfg.filter === 'closed'
+      ? 'Nothing closed yet'
+      : items.length > 0 && cfg.filter === 'open'
+        ? 'All clear: every item is closed'
+        : cfg.autoFlag
+          ? 'Nothing on the radar yet. Claude flags what it notices while it works.'
+          : 'Nothing on the radar yet. Add a note below.'
+
+  return (
+    <Box key="radar" flexDirection="column" paddingX={2} paddingTop={0} paddingBottom={1} gap={1}>
+      <Box flexDirection="column">
+        {gradientText(Text, 'radar-title', '◎ RADAR')}
+        <Text color={THEME.muted} italic>
+          flaws, risks and loose ends spotted along the way
+        </Text>
+        {gradientText(Text, 'radar-rule', '━'.repeat(Math.min(34, width)), AURORA, false)}
+      </Box>
+      <Box key="radar-summary" flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={0}>
+        {chip('radar-count-high', `${counts.high} high`, counts.high > 0 ? THEME.danger : THEME.borderOff)}
+        {chip('radar-count-medium', `${counts.medium} medium`, counts.medium > 0 ? THEME.warn : THEME.borderOff)}
+        {chip('radar-count-low', `${counts.low} low`, counts.low > 0 ? THEME.chip : THEME.borderOff)}
+        <Text color={THEME.faint}>{`  ${counts.total} open · ${closed} closed`}</Text>
+      </Box>
+      <Box key="radar-controls" flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={2}>
+        <Box flexDirection="row" columnGap={1}>
+          <Text color={THEME.muted}>show</Text>
+          {choice('filter', RADAR_FILTERS, cfg.filter, v => void setRadarConfig($, { filter: v }))}
+        </Box>
+        <Box flexDirection="row" columnGap={1}>
+          <Text color={THEME.muted}>sort</Text>
+          {choice('sort', RADAR_SORTS, cfg.sort, v => void setRadarConfig($, { sort: v }))}
+        </Box>
+      </Box>
+      {shown.length === 0 ? (
+        <Box key="radar-empty" borderStyle="round" borderColor={THEME.borderOff} paddingX={1} justifyContent="center">
+          <Text color={THEME.muted}>{empty}</Text>
+        </Box>
+      ) : (
+        <Box key="radar-list" flexDirection="column">
+          {shown.map(card)}
+        </Box>
+      )}
+      {Input ? (
+        <Input
+          key="radar-add"
+          label="+ "
+          placeholder="note something yourself"
+          submitLabel="add"
+          onSubmit={(value: string) => void flagRadar($, { title: value, kind: 'note', severity: 'medium' }, 'me')}
+        />
+      ) : null}
+      {closed > 0 ? (
+        <Button
+          key="radar-clear-closed"
+          label={`clear ${closed} closed`}
+          plain
+          dimColor
+          hover={{ color: THEME.danger, bold: true }}
+          onPress={() => void clearClosedRadar($)}
+        />
+      ) : null}
+      <Text color={THEME.faint}>fix: ask Claude · press the severity to change it · esc close</Text>
+    </Box>
+  )
+}
+
 async function setConfig($: EngineInterface, patch: Partial<StatusConfig>) {
   let saved: StatusConfig = DEFAULT_CONFIG
   await update($, statusConfig, c => (saved = { ...DEFAULT_CONFIG, ...c, ...patch }))
@@ -775,12 +1442,26 @@ function loadConfig(raw: unknown): StatusConfig {
 
 export const register: Register = on => {
   registerCleanView(on)
+  registerChanges(on)
+  registerRadar(on)
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // before anything reads the store, so the settings it brings over are the ones used
     await migrateFromUsageStatus($)
     await startCleanView($)
+    await $.command.register({ name: 'changes', description: "Step through Claude's file edits: accept or undo each" })
+    await $.command.register({
+      name: 'radar',
+      description: 'Open the radar of flagged issues, or add one: /radar <what you noticed>',
+      argumentHint: '[note]',
+    })
+    await $.tool.register({
+      name: FLAG_TOOL_NAME,
+      description: FLAG_TOOL_DESCRIPTION,
+      inputSchema: FLAG_TOOL_SCHEMA,
+      isDeferred: false,
+    })
     const saved = await $.store.get(STORE_KEY)
     if (typeof saved === 'boolean') await update($, statusLine, () => saved)
     const savedConfig = loadConfig(await $.store.get(CONFIG_KEY))
@@ -868,10 +1549,36 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const isConversationsOn = (await readConversationsConfig($)).enabled
     const isQuickyOn = (await readQuickyConfig($)).enabled
+    const isChangesOn = (await readDiffConfig($)).enabled
+    const toReview = pendingCount(await read($, diffSteps))
+    const radarCfg = await readRadarConfig($)
+    // the footer draws even when the project's list cannot be read
+    const radarOpen =
+      radarCfg.enabled && radarCfg.badge ? openCounts(await readRadarItems($).catch(() => [])).total : 0
     return (
       <Box key="footer" flexDirection="row" justifyContent="space-between" flexGrow={1}>
         <Text dimColor>{e.props.modes.join(' & ')}</Text>
         <Box flexDirection="row" gap={2}>
+          {radarCfg.enabled ? (
+            <Button
+              key="open-radar"
+              label={radarOpen > 0 ? `◎ radar (${radarOpen})` : '◎ radar'}
+              plain
+              color={AURORA[1]}
+              hover={{ color: AURORA[0], bold: true }}
+              onPress={() => void openRadar($)}
+            />
+          ) : null}
+          {isChangesOn ? (
+            <Button
+              key="open-changes"
+              label={toReview > 0 ? `± changes (${toReview})` : '± changes'}
+              plain
+              color={AURORA[1]}
+              hover={{ color: AURORA[0], bold: true }}
+              onPress={() => void openChanges($)}
+            />
+          ) : null}
           {isQuickyOn ? (
             <Button
               key="open-quicky"
@@ -910,6 +1617,8 @@ export const register: Register = on => {
     const view = await currentPanelView($)
     if (view === 'conversations' && (await readConversationsConfig($)).enabled) return renderConversations($, e)
     if (view === 'quicky' && (await readQuickyConfig($)).enabled) return renderQuicky($, e)
+    if (view === 'diff' && (await readDiffConfig($)).enabled) return renderChanges($, e)
+    if (view === 'radar' && (await readRadarConfig($)).enabled) return renderRadar($, e)
     return renderSettings($, e, false)
   })
 
@@ -955,6 +1664,8 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
   const meterHeight = await readMeterHeight($)
   const convCfg = await readConversationsConfig($)
   const quickyCfg = await readQuickyConfig($)
+  const diffCfg = await readDiffConfig($)
+  const radarCfg = await readRadarConfig($)
   const effortPick = await read($, effort)
   const themePick = await read($, themeAtom)
   applyTheme(themePick)
@@ -1244,6 +1955,75 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
     </Box>
   )
 
+  // an on/off row of the Radar card; dimmed when the option it depends on is off
+  const radarToggle = (key: 'autoFlag' | 'toast' | 'details' | 'files' | 'badge', label: string, isEnabled = true) => (
+    <Box key={`radar-sub-${key}`} flexDirection="row" justifyContent="space-between">
+      <Text color={isEnabled ? undefined : THEME.faint}>
+        <Text color={THEME.faint}>{'│ '}</Text>
+        {label}
+      </Text>
+      <Button
+        key={`radar-cfg-${key}`}
+        label={radarCfg[key] ? '● on ' : '○ off'}
+        plain
+        color={isEnabled && radarCfg[key] ? THEME.on : THEME.off}
+        hover={{ color: AURORA[0], bold: true }}
+        onPress={() => void setRadarConfig($, { [key]: !radarCfg[key] })}
+      />
+    </Box>
+  )
+
+  const radarOptions = (
+    <Box key="radar-options" flexDirection="column" marginTop={1}>
+      {radarToggle('autoFlag', 'Claude flags what it notices')}
+      {radarToggle('toast', 'Notify on each new flag', radarCfg.autoFlag)}
+      {radarToggle('details', 'Details')}
+      {radarToggle('files', 'File paths')}
+      {radarToggle('badge', 'Open count on the button')}
+      <Box key="radar-sub-sort" flexDirection="row" justifyContent="space-between">
+        <Text>
+          <Text color={THEME.faint}>{'│ '}</Text>
+          Sort by
+        </Text>
+        <Box flexDirection="row" columnGap={1}>
+          {RADAR_SORTS.map(s =>
+            s.value === radarCfg.sort ? (
+              <Box key={`radar-sort-cfg-${s.value}`}>{capsule(Box, Text, `cap-radar-sort-cfg-${s.value}`, s.label)}</Box>
+            ) : (
+              <Button
+                key={`radar-sort-cfg-${s.value}`}
+                label={s.label}
+                plain
+                dimColor
+                hover={{ color: AURORA[0], bold: true }}
+                onPress={() => void setRadarConfig($, { sort: s.value })}
+              />
+            ),
+          )}
+        </Box>
+      </Box>
+    </Box>
+  )
+
+  const changesOptions = (
+    <Box key="changes-options" flexDirection="column" marginTop={1}>
+      <Box key="diff-sub-hideReviewed" flexDirection="row" justifyContent="space-between">
+        <Text>
+          <Text color={THEME.faint}>{'│ '}</Text>
+          Hide reviewed steps
+        </Text>
+        <Button
+          key="diff-hideReviewed"
+          label={diffCfg.hideReviewed ? '● on ' : '○ off'}
+          plain
+          color={diffCfg.hideReviewed ? THEME.on : THEME.off}
+          hover={{ color: AURORA[0], bold: true }}
+          onPress={() => void setDiffConfig($, { hideReviewed: !diffCfg.hideReviewed })}
+        />
+      </Box>
+    </Box>
+  )
+
   // one card per mod: glowing title and colored frame while on, grey while off
   const settingRow = (opt: {
     key: string
@@ -1368,6 +2148,26 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
           stops: SUNSET,
           onToggle: () => void setConversationsConfig($, { enabled: !convCfg.enabled }),
           children: conversationsOptions,
+        })}
+        {settingRow({
+          key: 'toggle-changes',
+          icon: '±',
+          title: 'Changes',
+          detail: "A footer button and a pane to step through Claude's file edits, accepting or undoing each",
+          isOn: diffCfg.enabled,
+          stops: AURORA,
+          onToggle: () => void setDiffConfig($, { enabled: !diffCfg.enabled }),
+          children: changesOptions,
+        })}
+        {settingRow({
+          key: 'toggle-radar',
+          icon: '◎',
+          title: 'Radar',
+          detail: 'A to-do list of flaws, risks and inconsistencies spotted along the way, kept per project',
+          isOn: radarCfg.enabled,
+          stops: SUNSET,
+          onToggle: () => void setRadarConfig($, { enabled: !radarCfg.enabled }),
+          children: radarOptions,
         })}
       </Box>
 
@@ -2148,13 +2948,17 @@ function registerCleanView(on: On): void {
 
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
-    if (!(await read($, enabledAtom))) {
-      return composed
+    const sections = [...composed.sections]
+    if (await read($, enabledAtom)) {
+      sections.push({ id: 'clean-view:guide', text: GUIDE, scope: 'session' })
+    }
+    // Radar's guide shares this hook: the engine takes one unmatched prompt.compose per module
+    const radar = await readRadarConfig($)
+    if (radar.enabled && radar.autoFlag) {
+      sections.push({ id: 'radar:guide', text: RADAR_GUIDE, scope: 'session' })
     }
 
-    return {
-      sections: [...composed.sections, { id: 'clean-view:guide', text: GUIDE, scope: 'session' }],
-    }
+    return sections.length === composed.sections.length ? composed : { sections }
   })
 
   on('turn.start', async ($, e, next) => {

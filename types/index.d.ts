@@ -109,8 +109,72 @@ export type QuickyConfig = {
 export type QuickPreset = { label: string; args: string; needsValue: boolean; source: 'mine' | 'detected' }
 export type QuickPresets = Record<string, QuickPreset[]>
 
+// the changes pane: each file edit Claude made is one step, reviewed in order and accepted
+// (kept) or undone (taken back out of the file); an undone step can be redone
+export type DiffStepStatus = 'pending' | 'accepted' | 'undone'
+
+// one unified-diff hunk; each line starts with ' ', '-' or '+'
+export type DiffHunk = { oldStart: number; oldLines: number; newStart: number; newLines: number; lines: string[] }
+
+export type DiffStep = {
+  id: number
+  path: string
+  tool: string
+  at: number
+  // the tool created the file
+  isNew: boolean
+  added: number
+  removed: number
+  hunks: DiffHunk[]
+  status: DiffStepStatus
+}
+
+export type DiffConfig = {
+  enabled: boolean
+  // accepted and undone steps left out of the list and the stepping
+  hideReviewed: boolean
+}
+
+// Radar: flaws, risks and inconsistencies Claude (or the person) spotted along the way, kept
+// per project as a to-do list. inScope: part of the task at hand, flagged so it is not lost
+export type RadarKind = 'bug' | 'risk' | 'inconsistency' | 'debt' | 'note'
+export type RadarSeverity = 'high' | 'medium' | 'low'
+export type RadarStatus = 'open' | 'done' | 'dismissed'
+
+export type RadarItem = {
+  id: string
+  title: string
+  detail: string
+  kind: RadarKind
+  severity: RadarSeverity
+  file: string | null
+  inScope: boolean
+  status: RadarStatus
+  source: 'claude' | 'me'
+  createdAt: number
+  closedAt: number | null
+}
+
+// which items the pane lists
+export type RadarFilter = 'open' | 'closed' | 'all'
+export type RadarSort = 'severity' | 'newest'
+
+export type RadarConfig = {
+  enabled: boolean
+  // Claude is told to flag what it notices, and the flag tool takes its findings
+  autoFlag: boolean
+  // a toast each time Claude flags something
+  toast: boolean
+  details: boolean
+  files: boolean
+  // the open count on the footer button
+  badge: boolean
+  filter: RadarFilter
+  sort: RadarSort
+}
+
 // which view the one docked pane shows
-export type PanelView = 'settings' | 'conversations' | 'quicky'
+export type PanelView = 'settings' | 'conversations' | 'quicky' | 'diff' | 'radar'
 
 declare module 'claude-code' {
   interface PluginState {
@@ -138,6 +202,11 @@ declare module 'claude-code' {
       quickPresets: QuickPresets
       quickExpanded: string | null
       quickDetecting: string | null
+      diffSteps: DiffStep[]
+      diffCursor: number | null
+      diffConfig: DiffConfig
+      radarItems: RadarItem[] | null
+      radarConfig: RadarConfig
     }
   }
 }
