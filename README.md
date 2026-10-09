@@ -34,6 +34,7 @@ A band above the prompt that shows:
 - the current model
 - how much of the context window is used
 - your 5-hour usage window and when it resets
+- your weekly usage window and when it resets, with the weekday (for example `Mon 2:30 PM (in 3d4h)`)
 
 ![Status line](docs/images/status-line.png)
 

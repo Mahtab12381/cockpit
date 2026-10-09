@@ -1,6 +1,6 @@
 import type { SessionContextUsage, SessionRateLimit } from 'claude-code'
 
-import type { BarHeight, View } from '../types'
+import type { BarHeight, LimitMeter, View } from '../types'
 
 export type Figures = { context: SessionContextUsage; rateLimits: SessionRateLimit[] }
 
@@ -16,16 +16,29 @@ const clock12 = (at: Date) => {
   return `${h % 12 || 12}:${pad(at.getMinutes())} ${h < 12 ? 'AM' : 'PM'}`
 }
 
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+// e.g. 45m, 1h12m, or past a day 3d4h
 const countdown = (ms: number) => {
   const mins = Math.max(0, Math.ceil(ms / MINUTE))
   const h = Math.floor(mins / 60)
+  if (h >= 24) return `${Math.floor(h / 24)}d${h % 24}h`
   return h > 0 ? `${h}h${pad(mins % 60)}m` : `${mins}m`
 }
 
-export const toView = (model: string, { context, rateLimits }: Figures, now: number): View => {
-  const fiveHour = rateLimits.find(r => r.kind === 'five_hour')
-  const at = fiveHour?.resetsAt ? new Date(fiveHour.resetsAt) : null
+// one usage window; withDay names the weekday it resets on (Mon 2:30 PM), for a window over a day
+const limitMeter = (limit: SessionRateLimit | undefined, now: number, withDay: boolean): LimitMeter | null => {
+  if (!limit) return null
+  const at = limit.resetsAt ? new Date(limit.resetsAt) : null
+  return {
+    percent: limit.percentUsed,
+    detail: `${Math.max(0, Math.round((100 - limit.percentUsed) * 10) / 10)}% left`,
+    resetAt: at ? `${withDay ? `${DAYS[at.getDay()]} ` : ''}${clock12(at)}` : null,
+    resetIn: at ? countdown(at.getTime() - now) : null,
+  }
+}
 
+export const toView = (model: string, { context, rateLimits }: Figures, now: number): View => {
   return {
     model,
     contextWindow: kTokens(context.window),
@@ -36,14 +49,16 @@ export const toView = (model: string, { context, rateLimits }: Figures, now: num
             percent: context.percent ?? Math.round((context.tokens / context.window) * 100),
             detail: `${kTokens(context.tokens)}/${kTokens(context.window)}`,
           },
-    fiveHour: fiveHour
-      ? {
-          percent: fiveHour.percentUsed,
-          detail: `${Math.max(0, Math.round((100 - fiveHour.percentUsed) * 10) / 10)}% left`,
-          resetAt: at ? clock12(at) : null,
-          resetIn: at ? countdown(at.getTime() - now) : null,
-        }
-      : null,
+    fiveHour: limitMeter(
+      rateLimits.find(r => r.kind === 'five_hour'),
+      now,
+      false,
+    ),
+    weekly: limitMeter(
+      rateLimits.find(r => r.kind === 'seven_day'),
+      now,
+      true,
+    ),
   }
 }
 

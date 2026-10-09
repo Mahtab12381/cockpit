@@ -119,6 +119,7 @@ import type {
   DiffStep,
   DiffStepStatus,
   EffortPick,
+  LimitMeter,
   ModelPick,
   PanelView,
   QuickCommand,
@@ -142,6 +143,8 @@ const DEFAULT_CONFIG: StatusConfig = {
   context: true,
   fiveHour: true,
   reset: true,
+  weekly: true,
+  weeklyReset: true,
   bars: true,
   barWidth: 10,
   barHeight: 'thin',
@@ -1795,7 +1798,9 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
       {subToggle('context', 'Context usage', cfg.context)}
       {subToggle('fiveHour', '5-hour limit', cfg.fiveHour)}
       {subToggle('reset', 'Reset time', cfg.reset, cfg.fiveHour)}
-      {subToggle('bars', 'Progress bars', cfg.bars, cfg.context || cfg.fiveHour)}
+      {subToggle('weekly', 'Weekly limit', cfg.weekly)}
+      {subToggle('weeklyReset', 'Weekly reset time', cfg.weeklyReset, cfg.weekly)}
+      {subToggle('bars', 'Progress bars', cfg.bars, cfg.context || cfg.fiveHour || cfg.weekly)}
       <Box key="sub-barWidth" flexDirection="row" justifyContent="space-between">
         <Text color={cfg.bars ? undefined : THEME.faint}>
           <Text color={THEME.faint}>{'│ '}</Text>
@@ -2123,7 +2128,7 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
           key: 'toggle-status-line',
           icon: '▤',
           title: 'Status line',
-          detail: 'Model, context and 5h usage band above the prompt',
+          detail: 'Model, context, 5h and weekly usage band above the prompt',
           isOn,
           stops: AURORA,
           onToggle: () => void setStatusLine($, !isOn),
@@ -2591,27 +2596,31 @@ async function renderStatusLine($: EngineInterface, e: AbovePromptEvent) {
       ),
     )
   }
-  if (cfg.fiveHour) {
-    parts.push(
-      v.fiveHour ? (
-        <Box key="5h">
-          {meter('5h-meter', '5h', v.fiveHour.percent, v.fiveHour.detail, HEAT)}
-          {cfg.reset && v.fiveHour.resetAt ? (
-            <Text>
-              <Text color={THEME.faint}> · ↻ </Text>
-              <Text color={AURORA[0]} bold>
-                {v.fiveHour.resetAt}
-              </Text>
-              <Text color={THEME.faint}> (in {v.fiveHour.resetIn})</Text>
+  // a usage window: its meter, then when it resets; a dash until the figures arrive
+  const limitPart = (key: string, label: string, limit: LimitMeter | null, showReset: boolean) =>
+    limit ? (
+      <Box key={key}>
+        {meter(`${key}-meter`, label, limit.percent, limit.detail, HEAT)}
+        {showReset && limit.resetAt ? (
+          <Text>
+            <Text color={THEME.faint}> · ↻ </Text>
+            <Text color={AURORA[0]} bold>
+              {limit.resetAt}
             </Text>
-          ) : null}
-        </Box>
-      ) : (
-        <Text key="5h" color={THEME.faint}>
-          5h —
-        </Text>
-      ),
+            <Text color={THEME.faint}> (in {limit.resetIn})</Text>
+          </Text>
+        ) : null}
+      </Box>
+    ) : (
+      <Text key={key} color={THEME.faint}>
+        {label} —
+      </Text>
     )
+  if (cfg.fiveHour) {
+    parts.push(limitPart('5h', '5h', v.fiveHour, cfg.reset))
+  }
+  if (cfg.weekly) {
+    parts.push(limitPart('wk', 'wk', v.weekly, cfg.weeklyReset))
   }
   if (parts.length === 0) {
     return null

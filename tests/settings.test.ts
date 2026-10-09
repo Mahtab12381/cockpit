@@ -67,3 +67,21 @@ test('status line options toggle, cycle the bar width, and hide while the status
     await pane.unmount()
   }
 })
+
+test('the weekly limit and its reset time switch on and off from the status line card', async ($, on) => {
+  mock.store(on)
+  const pane = await $.ui.mount({
+    plugin: 'cockpit',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'cockpit-settings',
+    props: {},
+  } as never)
+  expect((await pane.find({ key: 'cfg-weekly' }))?.text).toMatch(/on/)
+  expect((await pane.find({ key: 'cfg-weeklyReset' }))?.text).toMatch(/on/)
+  await pane.press({ key: 'cfg-weekly' })
+  expect((await pane.find({ key: 'cfg-weekly' }))?.text).toMatch(/off/)
+  await pane.press({ key: 'cfg-weeklyReset' })
+  expect((await pane.find({ key: 'cfg-weeklyReset' }))?.text).toMatch(/off/)
+  await pane.unmount()
+})

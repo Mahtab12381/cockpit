@@ -1,10 +1,15 @@
 export type Meter = { percent: number; detail: string }
 
+// a usage window with its reset: the clock time it resets at and how long until then
+export type LimitMeter = Meter & { resetAt: string | null; resetIn: string | null }
+
 export type View = {
   model: string
   context: Meter | null
   contextWindow: string
-  fiveHour: (Meter & { resetAt: string | null; resetIn: string | null }) | null
+  fiveHour: LimitMeter | null
+  // the 7-day window; its reset names the weekday too
+  weekly: LimitMeter | null
 }
 
 export type BarWidth = 5 | 10 | 15
@@ -18,6 +23,8 @@ export type StatusConfig = {
   context: boolean
   fiveHour: boolean
   reset: boolean
+  weekly: boolean
+  weeklyReset: boolean
   bars: boolean
   barWidth: BarWidth
   barHeight: BarHeight
