@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Args, EngineInterface, On, Register, RenderInput, Timer } from 'claude-code'
+import type { Args, EngineInterface, On, Register, RenderChildren, RenderInput, Timer } from 'claude-code'
 
 import {
   PLAN_TOOL,
@@ -980,8 +980,8 @@ async function renderChanges($: EngineInterface, e: Extract<RenderInput, { compo
   const undone = steps.filter(s => s.status === 'undone').length
   const goTo = (id: number) => void update($, diffCursor, () => id)
 
-  const action = (key: string, label: string, color: string | undefined, onPress: () => void) => (
-    <Button key={key} label={label} plain color={color} hover={{ color: AURORA[0], bold: true }} onPress={onPress} />
+  const action = (key: string, label: string, onPress: () => void, isQuiet = false) => (
+    <Button key={key} label={label} plain dimColor={isQuiet} hover={{ color: AURORA[0], bold: true }} onPress={onPress} />
   )
 
   const stepCard = (s: DiffStep) => {
@@ -1010,9 +1010,9 @@ async function renderChanges($: EngineInterface, e: Extract<RenderInput, { compo
           </Box>
         </Box>
         <Box flexDirection="row" gap={2} marginTop={1}>
-          {s.status === 'pending' ? action(`accept-${s.id}`, '✓ accept', THEME.on, () => void acceptStep($, s.id)) : null}
-          {s.status !== 'undone' ? action(`undo-${s.id}`, '↶ undo', HEAT[2], () => void undoStep($, s.id)) : null}
-          {s.status === 'undone' ? action(`redo-${s.id}`, '↷ redo', AURORA[1], () => void redoStep($, s.id)) : null}
+          {s.status === 'pending' ? action(`accept-${s.id}`, '✓ accept', () => void acceptStep($, s.id)) : null}
+          {s.status !== 'undone' ? action(`undo-${s.id}`, '↶ undo', () => void undoStep($, s.id)) : null}
+          {s.status === 'undone' ? action(`redo-${s.id}`, '↷ redo', () => void redoStep($, s.id)) : null}
           {s.status !== 'pending' ? <Text color={THEME.faint}>{s.status}</Text> : null}
         </Box>
         <Box marginTop={1} flexDirection="column">
@@ -1068,10 +1068,10 @@ async function renderChanges($: EngineInterface, e: Extract<RenderInput, { compo
             {` · ${accepted} accepted · ${undone} undone`}
           </Text>
           <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-            {toReview > 0 ? action('accept-all', '✓ accept all', THEME.on, () => void acceptAll($)) : null}
-            {toReview > 0 ? action('undo-all', '↶ undo all', HEAT[2], () => void undoAll($)) : null}
+            {toReview > 0 ? action('accept-all', '✓ accept all', () => void acceptAll($)) : null}
+            {toReview > 0 ? action('undo-all', '↶ undo all', () => void undoAll($)) : null}
             {accepted + undone > 0
-              ? action('clear-reviewed', 'clear reviewed', THEME.muted, () => void clearReviewed($))
+              ? action('clear-reviewed', 'clear reviewed', () => void clearReviewed($), true)
               : null}
           </Box>
         </Box>
@@ -1081,9 +1081,9 @@ async function renderChanges($: EngineInterface, e: Extract<RenderInput, { compo
       ) : (
         <Box key="changes-step" flexDirection="column">
           <Box flexDirection="row" justifyContent="space-between">
-            {prev ? action('step-prev', '◂ prev', AURORA[1], () => goTo(prev.id)) : <Text color={THEME.faint}>◂ prev</Text>}
+            {prev ? action('step-prev', '◂ prev', () => goTo(prev.id)) : <Text color={THEME.faint}>◂ prev</Text>}
             <Text color={THEME.muted}>{`step ${index + 1} of ${shown.length}`}</Text>
-            {next ? action('step-next', 'next ▸', AURORA[1], () => goTo(next.id)) : <Text color={THEME.faint}>next ▸</Text>}
+            {next ? action('step-next', 'next ▸', () => goTo(next.id)) : <Text color={THEME.faint}>next ▸</Text>}
           </Box>
           {stepCard(step)}
         </Box>
@@ -1282,14 +1282,17 @@ async function renderRadar($: EngineInterface, e: Extract<RenderInput, { compone
             </Text>
           </Box>
           {isOpen ? (
-            <Button
-              key={`radar-sev-${i.id}`}
-              label={` ${i.severity} `}
-              plain
-              color={color}
-              hover={{ color: AURORA[0], bold: true }}
-              onPress={() => void cycleRadarSeverity($, i.id)}
-            />
+            // a button label takes no color, so a colored dot beside it shows the severity
+            <Box key={`radar-sev-box-${i.id}`} flexShrink={0} flexDirection="row">
+              <Text color={color}>●</Text>
+              <Button
+                key={`radar-sev-${i.id}`}
+                label={` ${i.severity} `}
+                plain
+                hover={{ color: AURORA[0], bold: true }}
+                onPress={() => void cycleRadarSeverity($, i.id)}
+              />
+            </Box>
           ) : (
             chip(`radar-sev-${i.id}`, i.severity, THEME.borderOff)
           )}
@@ -1308,7 +1311,6 @@ async function renderRadar($: EngineInterface, e: Extract<RenderInput, { compone
                 key={`radar-fix-${i.id}`}
                 label="→ fix"
                 plain
-                color={AURORA[1]}
                 hover={{ color: AURORA[0], bold: true }}
                 onPress={() => void fixRadarItem($, i)}
               />
@@ -1318,7 +1320,6 @@ async function renderRadar($: EngineInterface, e: Extract<RenderInput, { compone
                 key={`radar-done-${i.id}`}
                 label="✓ done"
                 plain
-                color={THEME.on}
                 hover={{ color: AURORA[0], bold: true }}
                 onPress={() => void setRadarStatus($, i.id, 'done')}
               />
@@ -1338,7 +1339,6 @@ async function renderRadar($: EngineInterface, e: Extract<RenderInput, { compone
                 key={`radar-reopen-${i.id}`}
                 label="↺ reopen"
                 plain
-                color={AURORA[1]}
                 hover={{ color: AURORA[0], bold: true }}
                 onPress={() => void setRadarStatus($, i.id, 'open')}
               />
@@ -1567,7 +1567,6 @@ export const register: Register = on => {
               key="open-radar"
               label={radarOpen > 0 ? `◎ radar (${radarOpen})` : '◎ radar'}
               plain
-              color={AURORA[1]}
               hover={{ color: AURORA[0], bold: true }}
               onPress={() => void openRadar($)}
             />
@@ -1577,7 +1576,6 @@ export const register: Register = on => {
               key="open-changes"
               label={toReview > 0 ? `± changes (${toReview})` : '± changes'}
               plain
-              color={AURORA[1]}
               hover={{ color: AURORA[0], bold: true }}
               onPress={() => void openChanges($)}
             />
@@ -1587,7 +1585,6 @@ export const register: Register = on => {
               key="open-quicky"
               label="✶ quicky"
               plain
-              color={AURORA[1]}
               hover={{ color: AURORA[0], bold: true }}
               onPress={() => void openQuicky($)}
             />
@@ -1597,7 +1594,6 @@ export const register: Register = on => {
               key="open-conversations"
               label="✧ conversations"
               plain
-              color={AURORA[1]}
               hover={{ color: AURORA[0], bold: true }}
               onPress={() => void openConversations($)}
             />
@@ -1606,7 +1602,6 @@ export const register: Register = on => {
             key="open-settings"
             label="✦ settings"
             plain
-            color={AURORA[1]}
             hover={{ color: AURORA[0], bold: true }}
             onPress={() => void openSettings($)}
           />
@@ -1784,7 +1779,7 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
         key={`cfg-${key}`}
         label={value ? '● on ' : '○ off'}
         plain
-        color={isEnabled && value ? THEME.on : THEME.off}
+        dimColor={!(isEnabled && value)}
         hover={{ color: AURORA[0], bold: true }}
         onPress={() => void setConfig($, { [key]: !value })}
       />
@@ -1810,7 +1805,7 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
           key="cfg-barWidth"
           label={`◂ ${cfg.barWidth} ▸`}
           plain
-          color={cfg.bars ? AURORA[0] : THEME.off}
+          dimColor={!cfg.bars}
           hover={{ color: AURORA[2], bold: true }}
           onPress={() => void setConfig($, { barWidth: nextWidth })}
         />
@@ -1824,7 +1819,7 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
           key="cfg-barHeight"
           label={heightLabel(cfg.barHeight)}
           plain
-          color={cfg.bars ? AURORA[0] : THEME.off}
+          dimColor={!cfg.bars}
           hover={{ color: AURORA[2], bold: true }}
           onPress={() => void setConfig($, { barHeight: nextHeight(cfg.barHeight) })}
         />
@@ -1832,7 +1827,7 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
     </Box>
   )
 
-  const nextMeterWidth = METER_WIDTHS[(METER_WIDTHS.indexOf(meterWidth as never) + 1) % METER_WIDTHS.length]
+  const nextMeterWidth = METER_WIDTHS[(METER_WIDTHS.indexOf(meterWidth as never) + 1) % METER_WIDTHS.length] ?? METER_WIDTHS[0]
   const cleanViewOptions = (
     <Box key="clean-view-options" flexDirection="column" marginTop={1}>
       <Box key="cv-sub-barHeight" flexDirection="row" justifyContent="space-between">
@@ -1844,7 +1839,6 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
           key="cv-barHeight"
           label={heightLabel(meterHeight)}
           plain
-          color={AURORA[0]}
           hover={{ color: AURORA[2], bold: true }}
           onPress={() => void setMeterHeight($, nextHeight(meterHeight))}
         />
@@ -1858,7 +1852,6 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
           key="cv-barWidth"
           label={`◂ ${meterWidth} ▸`}
           plain
-          color={AURORA[0]}
           hover={{ color: AURORA[2], bold: true }}
           onPress={() => void setMeterWidth($, nextMeterWidth)}
         />
@@ -1877,7 +1870,7 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
         key={`conv-${key}`}
         label={convCfg[key] ? '● on ' : '○ off'}
         plain
-        color={isEnabled && convCfg[key] ? THEME.on : THEME.off}
+        dimColor={!(isEnabled && convCfg[key])}
         hover={{ color: AURORA[0], bold: true }}
         onPress={() => void setConversationsConfig($, { [key]: !convCfg[key] })}
       />
@@ -1898,7 +1891,6 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
           key="conv-maxCount"
           label={`◂ ${convCfg.maxCount} ▸`}
           plain
-          color={AURORA[0]}
           hover={{ color: AURORA[2], bold: true }}
           onPress={() => void setConversationsConfig($, { maxCount: nextMax(convCfg.maxCount) })}
         />
@@ -1921,7 +1913,7 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
         key={`quicky-${key}`}
         label={quickyCfg[key] ? '● on ' : '○ off'}
         plain
-        color={isEnabled && quickyCfg[key] ? THEME.on : THEME.off}
+        dimColor={!(isEnabled && quickyCfg[key])}
         hover={{ color: AURORA[0], bold: true }}
         onPress={() => void setQuickyConfig($, { [key]: !quickyCfg[key] })}
       />
@@ -1971,7 +1963,7 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
         key={`radar-cfg-${key}`}
         label={radarCfg[key] ? '● on ' : '○ off'}
         plain
-        color={isEnabled && radarCfg[key] ? THEME.on : THEME.off}
+        dimColor={!(isEnabled && radarCfg[key])}
         hover={{ color: AURORA[0], bold: true }}
         onPress={() => void setRadarConfig($, { [key]: !radarCfg[key] })}
       />
@@ -2021,7 +2013,7 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
           key="diff-hideReviewed"
           label={diffCfg.hideReviewed ? '● on ' : '○ off'}
           plain
-          color={diffCfg.hideReviewed ? THEME.on : THEME.off}
+          dimColor={!diffCfg.hideReviewed}
           hover={{ color: AURORA[0], bold: true }}
           onPress={() => void setDiffConfig($, { hideReviewed: !diffCfg.hideReviewed })}
         />
@@ -2038,7 +2030,7 @@ async function renderSettings($: EngineInterface, e: RenderInput, inBand: boolea
     isOn: boolean
     stops: readonly string[]
     onToggle: () => void
-    children?: unknown
+    children?: RenderChildren
   }) => (
     <Box
       key={`row-${opt.key}`}
@@ -2290,7 +2282,6 @@ async function renderQuicky($: EngineInterface, e: Extract<RenderInput, { compon
           key={`preset-add-${name}-${p.args}`}
           label="+ add"
           plain
-          color={AURORA[0]}
           hover={{ color: AURORA[2], bold: true }}
           onPress={() => void addQuick($, name, p.args)}
         />
@@ -2301,7 +2292,6 @@ async function renderQuicky($: EngineInterface, e: Extract<RenderInput, { compon
             key={`preset-run-${name}-${p.args}`}
             label="> run"
             plain
-            color={THEME.on}
             hover={{ color: AURORA[0], bold: true }}
             onPress={() => void runQuick($, name, p.args)}
           />
@@ -2344,7 +2334,6 @@ async function renderQuicky($: EngineInterface, e: Extract<RenderInput, { compon
             key={`detect-${c.name}`}
             label={detecting === c.name ? 'detecting options' : 'detect options'}
             plain
-            color={AURORA[1]}
             hover={{ color: AURORA[0], bold: true }}
             onPress={() => void detectPresets($, c.name, c.description)}
           />
@@ -2378,7 +2367,6 @@ async function renderQuicky($: EngineInterface, e: Extract<RenderInput, { compon
             key={`add-${c.name}`}
             label="+ add"
             plain
-            color={AURORA[0]}
             hover={{ color: AURORA[2], bold: true }}
             onPress={() => void addQuick($, c.name)}
           />
@@ -2386,7 +2374,6 @@ async function renderQuicky($: EngineInterface, e: Extract<RenderInput, { compon
             key={`run-${c.name}`}
             label="> run"
             plain
-            color={THEME.on}
             hover={{ color: AURORA[0], bold: true }}
             onPress={() => void runQuick($, c.name)}
           />
@@ -2567,7 +2554,7 @@ async function renderStatusLine($: EngineInterface, e: AbovePromptEvent) {
   }
 
   // each part is switchable from the settings pane
-  const parts: unknown[] = []
+  const parts: RenderChildren[] = []
   if (cfg.model) {
     parts.push(
       <Box key="model" flexDirection="row">

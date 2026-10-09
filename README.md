@@ -103,6 +103,7 @@ You can show 5, 10, 20 or 40 conversations. The status dots, the legend, the age
 ```
 claude plugin validate .   # check the plugin and marketplace manifests
 claude plugin test .       # run the tests in tests/
+npx -p typescript tsc -p .  # type-check (needs the API types in .claude-plugin/types/)
 claude plugin tag . --push # tag a release as cockpit--v<version>
 ```
 

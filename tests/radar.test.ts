@@ -106,7 +106,9 @@ test("Claude's flags land on the radar, with a toast; the pane marks done, dismi
 
   // a note of my own, then the closed one cleared
   await pane.press({ key: 'radar-filter-all' })
-  await pane.input({ key: 'radar-add', text: 'Ask the team about the retry policy' })
+  // the kit's mount handle has an input act its typing leaves out
+  const typed = pane as unknown as { input: (target: object) => Promise<unknown> }
+  await typed.input({ key: 'radar-add', text: 'Ask the team about the retry policy' })
   expect((await pane.find({ key: 'radar-list' }))?.text).toContain('Ask the team about the retry policy')
   await pane.press({ key: 'radar-clear-closed' })
   expect((await pane.find({ key: 'radar-summary' }))?.text).toContain('2 open · 0 closed')
